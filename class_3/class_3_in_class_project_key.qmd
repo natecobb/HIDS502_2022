@@ -1,0 +1,109 @@
+---
+title: "COVID Registry Skeleton"
+format: 
+  html:
+    self-contained: true
+---
+
+```{r}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticMGUH2022",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          bigint = "numeric")
+
+# Use this to set a default connection for every SQL chunk
+# There seems to be some sort of bug in Quarto that requires this
+knitr::opts_chunk$set(connection = "con")
+```
+
+# COVID Data
+
+How many encounters for COVID? Here we are going to use a fuzzy match using SQL, ie the "%" sign and the LIKE
+```{sql connection=con}
+-- Your code goes here
+SELECT code, reasondescription,
+  COUNT(id) AS encounters, 
+  COUNT(DISTINCT patient) as patients
+FROM encounters
+WHERE reasondescription like '%COVID%' or reasondescription LIKE '%SARS%'
+GROUP BY code, reasondescription
+```
+
+
+Why kind of encounters are these?
+
+```{sql connection=con}
+SELECT encounterclass, description, count(*) 
+FROM encounters 
+WHERE reasondescription like '%COVID%' 
+GROUP BY encounterclass, description
+```
+
+Where what about lab tests? These show in the `observations` tables. How may tests did we have, what proportion were positive? You will want to start by looking at the table structure, then figuring out how you might be able to find a value. Remember, these disease is COVID-19, but the virus is SARS-CoV-2!
+
+```{sql connection=con}
+  SELECT DISTINCT code, description, value
+  FROM observations 
+  WHERE description like '%SARS%' or description LIKE '%COVID%'
+```
+
+```{sql connection=con}
+  SELECT COUNT(*) as total_tests, 
+         SUM(CASE WHEN value = 'Detected (qualifier value)' THEN 1 ELSE 0 END) AS positives,
+         SUM(CASE WHEN value = 'Detected (qualifier value)' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as positive_rate
+  FROM observations 
+  WHERE code = '94531-1' -- these are text codes, maps to SARS-CoV-2 RNA Pnl Resp
+```
+How about people who are recorded as having COVID as a problem/condition? What kinds of problem/conditions do we have? How many patients were suspected to have COVID in 2020?
+
+```{sql connection=con}
+  SELECT DISTINCT description, code
+    FROM conditions 
+    WHERE description LIKE '%COVID%' or description LIKE '%SARS%'
+```
+
+```{sql connection=con}
+
+  SELECT extract(year from start) encounter_year, COUNT(DISTINCT patient)
+    FROM conditions 
+    WHERE code = 840539006 OR code = 840544004 -- ie, description = 'COVID-19'
+    GROUP BY extract(year from start)
+```
+
+## Creating A COVID Registry
+
+Create a "registry" of the outpatients diagnosed with COVID (by any manner). Create your "registry" as a CTE and then show that you can query against it to provide summary metrics, eg total numbers etc.
+
+You may want to use either a `UNION` clause, or construct a join using the `WHERE id IN (SELECT id FROM ...)` syntax which returns a single row per match regardless of the number of matching rows on the right.
+
+Note that this doesn't inclde the data of diagnosis - this might take to some thought to accomplish!
+
+```{sql connection=con}
+WITH covid_population_mrns AS (
+  SELECT patient
+    FROM conditions WHERE code = 840539006 -- COVID-19
+  UNION
+  SELECT patient
+    FROM observations 
+    WHERE code = '94531-1' -- these are text codes, maps to SARS-CoV-2 RNA Pnl Resp NAA+probe
+      AND value = 'Detected (qualifier value)'
+),
+covid_population AS (
+  SELECT patient, birthdate, deathdate, race, ethnicity
+  FROM covid_population_mrns
+    LEFT JOIN patients ON patient = patients.id
+)
+-- Now use that big 'view' to get just the count of patients
+-- we could also do other things here, like group by gender etc
+select count(*) from covid_population 
+```
+
