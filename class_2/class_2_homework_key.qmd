@@ -1,0 +1,172 @@
+---
+title: "Quarto database example"
+format: 
+  html:
+    self-contained: true
+---
+
+This is an example Quarto document that shows how to connect to the Synthetic MGUH database (a PostgreSQL database in the Google Cloud environment). Quarto is most commonly used to execute chunks of Python or R code sequentially, but can be used for many different kinds of code including SQL. Here we will use it as a wrapper around SQL and RStudio as a basic interface to our database to query the database.
+
+```{r}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticMGUH2022",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          bigint = "numeric")
+
+# Use this to set a default connection for every SQL chunk
+# There seems to be some sort of bug in Quarto that requires this
+knitr::opts_chunk$set(connection = "con")
+```
+
+# Morbidity and Mortality
+
+What are the top 3 causes of morbidity (illness) and the top 3 causes of mortality (death) in the US? 
+In the Synthea data set, how would you estimate similar answers? 
+Hint - LOINC code '69453-9' is 'Cause of Death [US Standard Certificate of Death]' and can be found in the observations table.
+
+## Morbidity
+
+We could look in their problem list, but that's just a list of diagnoses that people carry ...
+
+```{sql connection=con}
+SELECT 
+  description as condition, 
+  COUNT(DISTINCT patient) patients 
+FROM conditions 
+GROUP BY description
+ORDER BY patients DESC
+LIMIT  10
+```
+
+More helpful is probably what they are actually seen for:
+
+```{sql connection=con}
+SELECT 
+  reasondescription as condition, 
+  COUNT(DISTINCT patient) patients 
+FROM encounters 
+WHERE reasondescription IS NOT NULL
+GROUP BY condition
+ORDER BY patients DESC
+LIMIT  10
+```
+
+## Mortality
+
+```{sql connection=con}
+SELECT 
+  value as cause_of_death, 
+  COUNT(DISTINCT patient) deaths-- we use a DISTINCT just in case there is multiple observations for a single death!
+FROM observations 
+WHERE code = '69453-9'
+GROUP BY cause_of_death
+ORDER BY deaths DESC
+LIMIT  10
+```
+
+# Insurance
+
+What is the breakdown of spending between Medicaid, Medicare and everything else in the US? Why do you think it might break down this way? How 
+In the Synthea data set, how would you estimate similar answers?
+
+One way to do this is look at the `encounters`, and then join over to the `payers` table. First we need to know what the payers look like. Note that "Dual Eligible" is someone who has both Medicare and Medicaid. You could also take a short cut and just look in the summary fields in the `payers` table as well.
+
+Another way to do this would be to assume that any time a payer failed to pay (eg, there was insurance, but the `payer_coverage` was 0) this was a suprise bill. This could be the case - but there are other reasons that a payer might fail to pay, eg the person hadn't met their deductible, it wasn't a covered service (cosmetic surgery etc). But it would be a reasonable first pass.
+
+```{sql connection=con}
+SELECT * FROM payers
+```
+
+We can use a CTE to clean this up and then use that in our queries - I wouldn't expect you to have know how to do this for this homework:
+
+```{sql connection=con}
+WITH payers_with_type AS
+(
+  SELECT
+    CASE WHEN name
+       NOT IN ('Dual Eligible', 'Medicare', 'Medicaid', 'NO_INSURANCE') 
+         THEN 'Private' ELSE name 
+    END AS payer_type,
+    *
+  FROM payers
+  )
+SELECT * FROM payers_with_type
+```
+```{sql connection=con}
+WITH payers_with_type AS
+(
+  SELECT
+    CASE WHEN name
+       NOT IN ('Dual Eligible', 'Medicare', 'Medicaid', 'NO_INSURANCE') 
+         THEN 'Private' ELSE name 
+    END AS payer_type,
+    *
+  FROM payers
+  )
+SELECT payer_type, 
+  COUNT(DISTINCT encounters.id) as encounters,
+  COUNT(DISTINCT patient) as patients,
+  SUM(base_encounter_cost) base_encounter_cost,
+  SUM(total_claim_cost) total_claim_cost,
+  SUM(payer_coverage) payer_coverage
+FROM encounters
+INNER JOIN payers_with_type 
+  ON encounters.payer = payers_with_type.id
+GROUP BY payer_type
+ORDER BY total_claim_cost DESC
+```
+# Lack of Insurance
+
+What percent of Americans are estimated to be uninsured in the United States? How has this changed over the past 15 years, and why?
+In the Synthea data set, how would you estimate similar answers?
+Hint - each encounter has insurance information associated with it, but if you want to know someone's insurance status at any given time you need the 'payer_transitions' table which is a history of patient's insurance coverage.
+
+Here's the quick and dirty way - lets execute 2 queries, on to get the total number of patients being seen in 2021, and the second for total number that had at least one uninsured visit.
+
+```{sql connection=con}
+SELECT COUNT(DISTINCT patient)
+FROM encounters 
+WHERE start BETWEEN '2021-01-01' AND '2021-12-31'
+```
+
+
+```{sql connection=con}
+SELECT COUNT(DISTINCT patient)
+FROM encounters 
+  -- We looked this up previously, its the code for 'NO_INSURANCE'
+WHERE payer = 'b1c428d6-4f07-31e0-90f0-68ffa6ff8c76'
+  AND start BETWEEN '2021-01-01' AND '2021-12-31'
+```
+
+# What is meant by "surprise billing" in the US? 
+
+Surprise billing is when a patient is billed out of network for a service they believed to have covered. For example, I have an emergency appendectomy at a hospital that assures me they take my insurance. However it turns out they were short staff and called in a part time anesthesiologist who doesn't take my insurance. She bills me directly for the full "fee" of her services, which are far more than the negotiated rate with an insurer.
+
+* How would you find evidence of this in the Synthea data set? Show whether it exists or does not exist in Synthea. *
+
+This is difficult, and I gave full points for basically any thoughtful attempt. We can look up a patients active insurance at any given time from the `payer_transitions` table. If we use an "inequality" join on the `start` of an encounter, we can pull their payer on that date. (This assumes that there is never more than one row in the `payer_transitions` for a given patient and date -- in the real world our data would be dirty and this would be unlikely to be true.)
+
+With this, we can look for cases where the patient had insurance, but the payer listed for the encounter was "NO_INSURANCE".
+
+```{sql connection=con}
+SELECT EXTRACT(YEAR from encounters.start) AS encounter_year, COUNT(DISTINCT encounters.patient) as patients
+  FROM encounters
+  LEFT JOIN payer_transitions ON
+    encounters.patient = payer_transitions.patient
+    AND encounters.start BETWEEN start_year and end_year
+WHERE payer_transitions.payer <> 'b1c428d6-4f07-31e0-90f0-68ffa6ff8c76' -- The had some sort of insurance at the time
+AND encounters.payer = 'b1c428d6-4f07-31e0-90f0-68ffa6ff8c76' -- But the encounter was billed to 'NO_INSURANCE'
+GROUP BY encounter_year
+ORDER BY encounter_year DESC
+LIMIT 10
+```
+
