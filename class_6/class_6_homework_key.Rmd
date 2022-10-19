@@ -1,0 +1,221 @@
+---
+title: "Lecture 7 Homework Key"
+author: "Nathan Cobb"
+date: "11/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse) # loads the tidyverse tools
+library(DBI) # loads our database interface
+library(RPostgres) # loads the database driver for PostgreSQL
+library(connections) # helps RPostgres work with RStudio
+
+
+# Normally we would use `DBI::dbConnect()` here, but the `RPostgres` library
+# doesn't integrate with the RStudio connections pane. This works around that fact.
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticmguh",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = "pursuit-parson-trivial",
+          # Tell the driver to return very large integers as floating point (vs truncating them)
+          bigint = "numeric")
+```
+
+# SyntheticMGUH Asthma Care Quality Report
+
+Asthma is a pervasive pulmonary disease in our population a SMGUH. Comploance with national guidelines provide us with a measure of performance. In this report we are going to look at the demographics of our asthma population, and then at 3 specific markers of quality: immunizations, care plans and medications.
+
+In general, all asthmatics should have an active care plan, they should have a prescription for a controller and emergency medication, and they should have recieved a pneumococcal vaccination in the last year. 
+
+This key represents a minimal solution to the posed problems rather than an optimal solution. 
+
+# Asthmatic Population at SMGUH
+
+Here is a more exapansive definition of asthmatics - here we are saying not just people with a condition assigned of asthma, but those that have been prescribed a drug for asthma or had an encounter for asthma.
+
+```{sql connection=con}
+-- Our CTE definition for the cohort
+    WITH AllAsthmaPatients AS (
+      -- anyone with a problem of asthma
+      SELECT DISTINCT patient 
+      FROM conditions WHERE description IN ('Asthma', 'Childhood asthma')
+      UNION 
+      -- anyone with an encounter for asthma
+      SELECT DISTINCT patient
+      FROM encounters WHERE reasondescription IN ('Asthma', 'Childhood asthma')
+      UNION
+      -- anyone prescribed a drug for asthma
+      SELECT DISTINCT patient
+      FROM medications WHERE reasondescription IN ('Asthma', 'Childhood asthma')
+    ),
+     AsthmaPatients AS (
+      SELECT patient, birthdate, deathdate, race, ethnicity, gender
+      FROM AllAsthmaPatients 
+        JOIN patients ON patients.id = AllAsthmaPatients.patient
+          -- We only want people that were alive during this period!
+          AND (deathdate IS NULL OR deathdate < '2019-09-24')
+    )
+    SELECT COUNT(patient) as patient_count FROM AsthmaPatients
+```
+
+Now that we've established that, lets create a temp table:
+
+```{sql connection=con}
+DROP  TABLE IF EXISTS AsthmaCohort
+```
+```{sql connection=con}
+-- Create a temp table as short cut
+   WITH AllAsthmaPatients AS (
+      -- anyone with a problem of asthma
+      SELECT DISTINCT patient 
+      FROM conditions WHERE description IN ('Asthma', 'Childhood asthma')
+      UNION 
+      -- anyone with an encounter for asthma
+      SELECT DISTINCT patient
+      FROM encounters WHERE reasondescription IN ('Asthma', 'Childhood asthma')
+      UNION
+      -- anyone prescribed a drug for asthma
+      SELECT DISTINCT patient
+      FROM medications WHERE reasondescription IN ('Asthma', 'Childhood asthma')
+    ),
+    AsthmaPatients AS (
+      SELECT AllAsthmaPatients.patient, birthdate, deathdate, race, ethnicity, gender,
+      date_part('year', age('2020-09-24', birthdate)) as age
+      FROM AllAsthmaPatients 
+        JOIN patients ON patients.id = AllAsthmaPatients.patient 
+          -- We only want people that were alive during this period!
+          AND (deathdate IS NULL OR deathdate < '2019-09-24')
+    )
+    SELECT * INTO TEMP AsthmaCohort FROM AsthmaPatients
+
+```
+```{sql connection=con}
+-- We can make this perform faster by adding an index on our temp table
+CREATE INDEX asthmacohort_patient ON AsthmaCohort(patient)
+```
+
+### Gender
+The gender breakdown is weighted towards women.   
+
+```{sql connection=con}
+    SELECT gender, count(*) as patients
+    FROM AsthmaCohort GROUP BY gender
+```
+
+### Age
+We didn't discuss in the assignment if we were looking at kids or adults, but there are a lot of kids in this cohort the way we have defined it!
+
+```{sql connection=con}
+    SELECT floor(age/10)*10 as age_group, count(*) patients
+    FROM AsthmaCohort 
+    GROUP BY age_group ORDER BY age_group
+```
+
+### Smokers
+Here we are going to use a more advanced technique to total up our smokers, but also really start chaining our CTEs! There are a lot of ways to accomplish this - window functions and subqueries are two others. I think this is the simplest to read, but is limited that it doesn't return all the possible smoking statuses.
+
+```{sql connection=con}
+WITH Smokers AS (
+      SELECT distinct patient, 1 AS smoker
+      FROM observations
+      WHERE code = '72166-2' AND value = 'Current every day smoker'
+      AND date BETWEEN '2019-09-24' AND '2020-09-24'
+    )
+    -- This is a common but advanced technique.
+    SELECT count(*) total_patients, sum(smoker) AS total_smokers,
+    sum(smoker) * 1.0 / count(*) * 100 AS smoking_rate_percent
+    FROM AsthmaCohort
+    LEFT JOIN Smokers ON Smokers.patient = AsthmaCohort.patient
+```
+
+# Compliance with Asthma Guidelines
+
+In these subsections describe the compliance with the recommendations for each element.
+
+## Care Plans
+
+How many patients have a care plan? We will define this as a careplan that was active during the last year, not one that has expired!
+```{sql connection=con}
+WITH active_careplans AS (
+    SELECT DISTINCT patient, 1 AS active_careplan
+    FROM careplans
+    WHERE
+    stop IS NULL -- its active
+    OR stop BETWEEN '2019-09-24' AND '2020-09-24' -- it was active into this year
+)
+SELECT 
+  count(distinct AsthmaCohort.patient) as total_patients,
+  SUM(active_careplan) as patients_with_active_careplan,
+  SUM(active_careplan) * 1.0 / count(distinct AsthmaCohort.patient) * 100 AS active_careplan_percent 
+FROM AsthmaCohort
+LEFT JOIN active_careplans
+ ON active_careplans.patient = AsthmaCohort.patient
+
+```
+# Medications
+
+How many patients are on at least one of the recommended medications? For simplicity purposes we are just going to pull the count here.
+
+```{sql connection=con}
+SELECT count(DISTINCT AsthmaCohort.patient) patients_with_any_medication
+  FROM AsthmaCohort
+  INNER JOIN medications ON medications.patient = AsthmaCohort.patient
+    -- Our inhalers
+    AND code IN ('895994', '2123111')
+    -- Is the medication active for our window? If it has ended earlier, its not valid!
+    AND (stop BETWEEN '2019-09-24' AND '2020-09-24' OR stop IS NULL) 
+```
+
+Of these, how many have a prescription for both?
+```{sql connection=con}
+SELECT count(DISTINCT AsthmaCohort.patient) patients_with_both_medications
+  FROM AsthmaCohort
+  INNER JOIN medications medications1 ON medications1.patient = AsthmaCohort.patient
+    AND medications1.code = '895994'
+    AND (medications1.stop BETWEEN '2019-09-24' AND '2020-09-24' OR medications1.stop IS NULL) 
+  INNER JOIN medications medications2 ON medications2.patient = AsthmaCohort.patient
+    AND medications2.code = '2123111'
+    AND (medications2.stop BETWEEN '2019-09-24' AND '2020-09-24' OR medications2.stop IS NULL)     
+```
+
+## Vaccinations
+
+Vaccination rates for the pnuemococcal vaccine are super low in this data set!
+
+```{sql connection=con}
+-- This is another way of tackling the same problem, we create a flag and add them up. They should be the same
+WITH  ActiveVaccinations AS (
+     SELECT DISTINCT patient, 1 AS has_vac
+     FROM immunizations WHERE description = 'Pneumococcal conjugate PCV 13'
+     AND date BETWEEN '2019-09-24' AND '2020-09-24'  
+    )
+    SELECT count(AsthmaCohort.patient) as patients, sum(has_vac) as vaccinated_patients
+    FROM AsthmaCohort
+     LEFT JOIN ActiveVaccinations ON ActiveVaccinations.patient = AsthmaCohort.patient
+
+```
+
+
+# Measure of Complexity
+
+One way of measuring who has uncontrolled asthma as to look to see if they have had a hospital admission recently. Another way would be to see how many times they have been seen in the outpatient clinic for an asthma visit, or if they have been prescribed steroids.
+
+```{sql connection=con}
+  SELECT count(DISTINCT AsthmaCohort.patient) high_risk_patients
+  FROM AsthmaCohort
+     INNER JOIN encounters ON encounters.patient = AsthmaCohort.patient
+     AND description = 'Emergency hospital admission for asthma'
+     AND start BETWEEN '2019-09-24' AND '2020-09-24'  
+```
+
+# Conclusions
+```{r include=FALSE}
+# This is how we would do this in R
+n_patients <- dbGetQuery(con, "SELECT COUNT(*) AS patients FROM AsthmaCohort") %>%
+  pull(patients)
+```
+
+We found `r n_patients` `asthmatics in our population. Adherence to recommended practice was pretty good, but immunization was a significant problem.
