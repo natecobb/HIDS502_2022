@@ -1,0 +1,257 @@
+---
+title: "Class 3 Homework Key"
+author: "Nathan Cobb"
+date: "10/04/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse) # loads the tidyverse tools
+library(DBI) # loads our database interface
+library(RPostgres) # loads the database driver for PostgreSQL
+library(connections) # helps RPostgres work with RStudio
+
+
+# Normally we would use `DBI::dbConnect` here, but the `RPostgres` library
+# doesn't integrate with the RStudio connections pane. This works around that fact.
+# If you use `odbc` then you don't need this. 
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticmguh",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = "pursuit-parson-trivial",
+          # Tell the driver to return very large integers as floating point (vs truncating them)
+          bigint = "numeric")
+```
+
+# Multi-stakeholder COVID Registry
+
+>3 DC Hospitals, MGUH, Sibley and GW want to collaborate and share data on all their COVID patients to learn about how to improve clinical care.
+>Each hospital uses a different EMR, with different data models and tools.
+>For your proposal, assume that your team will coordinate the process and host the data:
+
+## Cohort
+
+>What patients will be included, with specific logic to select them.
+
+For our registry we will define our patients as anyone who has had:
+
+ * An encounter coded for COVID-19
+ * A problem/condition in their record of COVID-19
+ * A positive lab test for COVID-19
+ 
+We deliberately do not include anyone with suspected COVID-19
+
+```{sql connection=con}
+WITH COVID_cohort AS (
+  -- Note that when you use UNION it enforces as DISTINCT on the results
+  -- so we should get one row per patient ID, even with multiple encounters etc
+  SELECT patient 
+    FROM encounters WHERE code = 1505002 -- COVID-19
+  UNION
+  SELECT patient 
+    FROM conditions WHERE code = 840539006 -- COVID-19
+  UNION
+  SELECT patient 
+    FROM observations WHERE code = '94531-1' -- these are text codes, maps to SARS-CoV-2 RNA Pnl Resp NAA+probe
+    AND value like 'Detected%'
+)
+SELECT COUNT(*) as rows, COUNT(DISTINCT patient) as patients -- checking to see that you have one patient per row is good practice!
+FROM COVID_cohort
+```
+
+
+
+
+>What data in addition to patient IDs will you include, and why?
+>Obviously you will want when they were diagnosed and age/gender, but what other data points? Where are they located? Specify table and how you will extract them.
+
+We will obtain basic demographics from the patients table. But it would be good to know when they were first diagnosed, we can put that in as well.
+
+For demographics we will want the person's age - but their age at diagnosis. So we need to calculate that.
+
+```{sql connection=con}
+WITH COVID_cohort_events AS (
+  SELECT patient, start as diagnosis_date
+    FROM encounters WHERE code = 1505002 -- COVID-19
+  UNION
+  SELECT patient, start as diagnosis_date
+    FROM conditions WHERE code = 840539006 -- COVID-19
+  UNION
+  SELECT patient, date as diagnosis_date
+    FROM observations WHERE code = '94531-1' -- these are text codes, maps to SARS-CoV-2 RNA Pnl Resp NAA+probe
+),
+COVID_cohort AS (
+  -- Here for every patient we return their patient ID and their first date of diagnosis
+  -- This ensures that we have 1 row per patient, regardless of how many diagnoses
+  SELECT patient, CAST(min(diagnosis_date) AS DATE) AS diagnosis_date
+  FROM COVID_cohort_events
+  GROUP BY patient
+)
+SELECT patients.id as patient, 
+       birthdate, deathdate, race, ethnicity, gender,
+       diagnosis_date,
+       -- Lets create a flag for if they died or not
+       CASE WHEN deathdate IS NOT NULL THEN true ELSE false END AS is_deceased,
+       -- Unlike most databases, Postgres has an "AGE" function - we will take advantage of that
+       AGE(diagnosis_date, birthdate) AS age_at_diagnosis
+ FROM COVID_cohort
+ INNER JOIN patients ON patients.id = COVID_cohort.patient
+```
+We can repeat this code over and over again, or we could copy the query into a temporary table. The easiest way to do the is 
+is with the `INTO TEMP` command.
+
+Note that the temporary table will be erased when your connection is broken, and that its only visible to this "session", eg if you are logged into the database elsewhere (with another R session, a GUI - or in this case, another student using the same account) you won't be able to see the temp table.
+
+```{sql connection=con}
+-- First we are going to drop our temp table if it exists. 
+DROP TABLE IF EXISTS covid_cohort_tmp;
+```
+
+```{sql connection=con}
+-- Here we use our CTE again:
+WITH COVID_cohort_events AS (
+  SELECT patient, start as diagnosis_date
+    FROM encounters WHERE code = 1505002 -- COVID-19
+  UNION
+  SELECT patient, start as diagnosis_date
+    FROM conditions WHERE code = 840539006 -- COVID-19
+  UNION
+  SELECT patient, date as diagnosis_date
+    FROM observations WHERE code = '94531-1' -- these are text codes, maps to SARS-CoV-2 RNA Pnl Resp NAA+probe
+),
+covid_cohort_patients AS (
+  -- Here for every patient we return their patient ID and their first date of diagnosis
+  -- This ensures that we have 1 row per patient, regardless of how many diagnoses
+  SELECT patient, CAST(min(diagnosis_date) AS DATE) AS diagnosis_date
+  FROM COVID_cohort_events
+  GROUP BY patient
+)
+SELECT patients.id as patient, 
+       birthdate, deathdate, race, ethnicity, gender,
+       diagnosis_date,
+       CASE WHEN deathdate IS NOT NULL THEN true ELSE false END AS is_deceased,
+       -- Unlike most databases, Postgres has an "AGE" function - we will take advantage of that
+       AGE(diagnosis_date, birthdate) AS age_at_diagnosis
+ -- And here's the secret sauce! Thise little line creates a temp table.
+ INTO TEMP covid_cohort_tmp
+ FROM covid_cohort_patients
+ INNER JOIN patients ON patients.id = covid_cohort_patients.patient
+```
+Lets see if that worked?
+
+```{sql connection=con}
+SELECT COUNT(*) total_rows, COUNT(DISTINCT patient) total_patients 
+ FROM covid_cohort_tmp
+```
+
+But we'd also like to know if they have other diseases. The CDC lists various risk factors - extracting all of these is difficult and outside the scope of this homework, but we should be able to grab a couple of the big ones - lets get obesity and diabetes. 
+
+We need to know a few codes
+
+* `162864005` is `Body mass index 30+ - obesity (finding)` in the `conditions` table.
+* `44054006` is `Diabetes` in the `conditions` table
+* `59621000` is `Hypertension` in the `conditions` table
+
+Note that there is a different code for BMI 40+, but we're ignoring that for simplicity. 
+
+```{sql connection=con}
+SELECT code, description, count(*)
+FROM covid_cohort_tmp
+  LEFT JOIN conditions on conditions.patient = covid_cohort_tmp.patient
+WHERE code IN (162864005, 44054006, 59621000)
+GROUP by code, description
+```
+
+We probably want all of this in a single table - ie, one row per patient. Remeber, a patient could have multiple recordings of 'Diabetes' as a condition. This is a lot of SQL, and much easier to do in R or Python. You were'nt expected to know how to do this for this homework, but being about to pivot from long to wide is an important skill. 
+
+(Note that in RMarkdown/RStudio you may need to click the little right arrow to see all the columns!)
+```{sql connection=con}
+WITH 
+-- We are going to define a few subqueries that just pull all our our
+-- cohort patients with the given condition, and we add flag to the results
+-- with the condition name as the column and then "TRUE".
+-- We use DISTINCT to make sure we only get one row per patient!!
+obesity AS (
+SELECT DISTINCT covid_cohort_tmp.patient, true as has_obesity
+FROM covid_cohort_tmp
+INNER JOIN conditions on conditions.patient = covid_cohort_tmp.patient
+    AND code = 162864005)
+, diabetes AS (
+SELECT DISTINCT covid_cohort_tmp.patient, true as has_diabetes
+FROM covid_cohort_tmp
+INNER JOIN conditions on conditions.patient = covid_cohort_tmp.patient
+    AND code = 44054006)
+, hypertension AS (
+SELECT DISTINCT covid_cohort_tmp.patient, true as has_hypertension
+FROM covid_cohort_tmp
+INNER JOIN conditions on conditions.patient = covid_cohort_tmp.patient
+    AND code = 59621000)
+-- Here we are going to pull the full cohort, and join the three
+-- subquery "tables" from above to create a full patient table with
+-- the three risk factor flags
+SELECT covid_cohort_tmp.patient, has_obesity, has_diabetes, has_hypertension
+FROM covid_cohort_tmp
+ LEFT JOIN obesity ON covid_cohort_tmp.patient = obesity.patient
+ LEFT JOIN diabetes ON covid_cohort_tmp.patient = diabetes.patient
+ LEFT JOIN hypertension ON covid_cohort_tmp.patient = hypertension.patient
+```
+
+## Data Integration
+
+>How will you assure that data from all 3 hospitals can be analyzed as a single data set?**
+>Be specific, use examples from "our" data.
+
+We will either need to require that all hospitals provide their data in a single "standard" format, or be prepared to convert their data on arrival. The first is easier and preferable, it puts the burden of maintaining data integrity onto the organization that generated the data to convert it.
+
+One possible choice would be to have each organization turn their data into OMOP format, but this would be complicated. Another would be to provide a "data definition" file to each organization that explicitly defines how their data should be formated.
+
+## Outcomes
+
+>What outcomes will you track, and why?
+>Specify which data (table etc) will be needed to support tracking these outcomes.
+
+We can use a number of different outcomes. The most basic would be progressing to needing hospitalization, or to death.
+
+ * Death, derived from the `patients` table (although its stored other places)
+ * Hospitalization from the `encounters` table
+ * Intubation from the `procedures` table (ie, being placed on a ventilator)
+
+We already have a date of death in our cohort table - but we'd want to be able to be sure that it was due to COVID. This is hard, so often we will simply say "any death within 30 days of diagnosis of COVID is due to COVID". We have a similar problem with hospitalizations, we'd only want to take hospitalization events is they were within a couple of weeks of the diagnosis (maybe a few days before to 2 weeks after). Intubation would need to be the same.
+
+```{sql connection=con}
+SELECT patient, diagnosis_date, deathdate, 
+CASE WHEN DATE_PART('day', deathdate - diagnosis_date) BETWEEN 0 AND 30 THEN true ELSE false END AS covid_mortality
+FROM covid_cohort_tmp
+
+```
+
+Lets find all the hospitalizations that occured -3 - 14 days after a diagnosis.
+
+The `encounterclass` type for an inpatient visit is "inpatient".
+
+```{sql connection=con}
+SELECT covid_cohort_tmp.patient, encounters.start, DATE_PART('day', encounters.start - diagnosis_date) AS days_to_admission
+FROM covid_cohort_tmp
+INNER JOIN encounters
+  ON encounters.patient = covid_cohort_tmp.patient
+  AND encounterclass = 'inpatient'
+  AND DATE_PART('day', encounters.start - diagnosis_date) BETWEEN -3 AND 14  
+```
+
+The code in `procedures` for intubation, ie placing a tube in the trachea in preparation to place someone on a ventilator, is 112798008 ("Insertion of endotracheal tube (procedure)"). But its also possible that they were intubated more than once - people could be intubated, extubated, get sick again and intubated again all in one encounter. So we need to make sure we only get one row back. One way to do this is just to get the first date of intubation for each patient.
+
+```{sql connection=con}
+SELECT covid_cohort_tmp.patient, min(procedures.date) AS first_intubation
+FROM covid_cohort_tmp
+INNER JOIN encounters
+  ON encounters.patient = covid_cohort_tmp.patient
+  AND encounterclass = 'inpatient'
+  AND DATE_PART('day', encounters.start - diagnosis_date) BETWEEN -3 AND 14  
+INNER JOIN procedures 
+  ON procedures.encounter = encounters.id 
+  AND procedures.code = '112798008'
+GROUP BY covid_cohort_tmp.patient
+```
+
