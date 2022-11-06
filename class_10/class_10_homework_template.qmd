@@ -1,0 +1,63 @@
+---
+title: "Lecture 10 Homework Framework"
+format: 
+  html:
+    self-contained: true
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticmguh",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          # Tell the driver to return very large integers as floating point (vs truncating them)
+          bigint = "numeric")
+
+knitr::opts_chunk$set(connection = "con")
+```
+
+# SyntheticMGUH As Big Data
+
+For this homework you should act as if the report will be distributed, thus cannot return any PHI. **Do not include identifiers such as names or medical record numbers at the individual level in your results** Avoid returning individual rows unless you want to indicate the structure of a result set for some reason - you should be returning summary data at this point.
+
+
+
+# Metadata
+
+The Synthea data set holds a `imaging` table with meta data. The meta data describes the modality and type of imaging study. 
+
+ * Present a summary table of the `imaging` to provide an overview of the most common types of imaging studies performed. (Do not return individual rows, summarize and present the data.)
+
+
+# Full Text
+
+## Asthma
+
+ * Using free text search, locate all of the patients whose notes indicated they may have asthma. *Do not return the patients, but return a summary of the cohort*
+ * How many of the patients you identified have a condition listed as 'asthma' in the `conditions` table?
+
+
+## Allergies
+
+Some CT scans are done with "contrast", an intravenous form of dye to make the scan results clearer. People with shellfish allergies may have a similar reaction to contrast dye.
+
+ * Allergies are available in Synthea in the allergy table, but in the real world this is not always so clear. Using only the `notes` table, find all the patients that have an shellfish allergy, and then using the `imaging` table determine home many of those patients have had a CT scan.
+
+# Patient Matching
+
+ * How many patients in the Synthea database have the same first and last name? How many have the same first, last, gender and live in the same zip code?
+
+Hint: You can do this with a `JOIN` approach or a `GROUP BY` approach. If you use the latter you may want to look at the `HAVING` command as a filter.
+
+# Bonus
+
+* How many patients might have duplicate accounts based on middle name or first name errors? (You may not find any ... but show me how you would approach this.)

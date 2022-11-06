@@ -19,7 +19,8 @@ con <- connection_open(RPostgres::Postgres(),
           dbname = "syntheticmguh",
           host = "35.199.26.47",
           user = "hids502_student",
-          password = "pursuit-parson-trivial",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
           # Tell the driver to return very large integers as floating point (vs truncating them)
           bigint = "numeric")
 ```

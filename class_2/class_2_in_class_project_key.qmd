@@ -2,7 +2,7 @@
 title: "Quarto database example"
 format: 
   html:
-    self-contained: true
+    embed-resources: true
 ---
 
 This is an example Quarto document that shows how to connect to the Synthetic MGUH database (a PostgreSQL database in the Google Cloud environment). Quarto is most commonly used to execute chunks of Python or R code sequentially, but can be used for many different kinds of code including SQL. Here we will use it as a wrapper around SQL and RStudio as a basic interface to our database to query the database.

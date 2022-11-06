@@ -2,7 +2,7 @@
 title: "COVID Registry Skeleton"
 format: 
   html:
-    self-contained: true
+    embed-resources: true
 ---
 
 ```{r}
