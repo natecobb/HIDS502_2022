@@ -1,0 +1,17 @@
+---
+title: "Reproducable Chick Weights"
+format: html
+---
+
+```{r}
+library(tidyverse)
+
+chick_weights <- 
+  read_csv("class_12/chickweights.csv")
+```
+
+```{r}
+ggplot(chick_weights) +
+  geom_histogram(aes(x = weight))
+```
+
