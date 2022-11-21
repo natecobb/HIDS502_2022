@@ -1,15 +1,17 @@
 ---
-title: "Lecture 10 In Class Framework"
+title: "Lecture 10 Homework Key"
 format: 
   html:
     self-contained: true
 ---
+
 ```{r setup, include=FALSE}
 #| warning: false
 library(tidyverse)     # loads the tidyverse tools
 library(RPostgres)     # loads the database driver for PostgreSQL
 library(connections)   # helps RPostgres work with RStudio
 library(keyring)       # access to a local encrypted keychain for passwords
+
 
 con <- connection_open(RPostgres::Postgres(),
           dbname = "syntheticMGUH2022",
@@ -35,7 +37,10 @@ SELECT avg(heart_rate_observations)
 FROM observations_per_encounter;
 ```
 
+```{sql connection=con}
+select * from notes limit 10
 
+```
 # String Matching
 
 ```{sql connection=con}
@@ -71,7 +76,7 @@ Ok, lets try and actually find some duplicate patients!
 First lets find some of the most common potential matches based just on first and last:
 
 ```{sql connection=con}
-select apr1.first, apr1.last, count(DISTINCT apr1.enterpriseid)
+select apr1.first, apr1.last, count(DISTINCT apr2.enterpriseid)
 FROM pmc.all_patient_records AS apr1
 -- This is a self-join, we are going to join the same table to
 -- itself; to do so we need to give each copy a unique name

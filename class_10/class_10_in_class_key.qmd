@@ -1,0 +1,150 @@
+---
+title: "Class 10 In-Class Project Solutions"
+format: 
+  html:
+    self-contained: true
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticMGUH2022",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          # Tell the driver to return very large integers as floating point (vs truncating them)
+          bigint = "numeric")
+
+knitr::opts_chunk$set(connection = "con")
+```
+
+First lets find some of the most common potential matches based just on first and last:
+
+```{sql connection=con}
+WITH possible_matches AS (
+  SELECT 
+  CASE -- SSN
+    WHEN target.ssn = matches.ssn THEN 5
+    -- Single digit typo!
+    WHEN levenshtein(target.ssn::text, matches.ssn::text) = 1 THEN 0.5
+    ELSE 0 END
+  +
+  CASE -- MRN
+    WHEN target.mrn = matches.mrn THEN 3
+    ELSE 0 END
+  +
+  CASE -- first name
+    WHEN target.first = matches.first THEN 1
+    WHEN SOUNDEX(target.first)  = SOUNDEX(matches.first) THEN 0.5
+    ELSE 0 END
+  + 
+  CASE -- last name 
+    WHEN target.last = matches.last THEN 2 
+    WHEN SOUNDEX(target.last)  = SOUNDEX(target.last) THEN 0.5
+    ELSE 0 END
+  +
+  CASE -- middle name 
+    WHEN target.middle = matches.middle THEN 1 
+    WHEN target.middle IS NULL or matches.middle IS NULL THEN 0.5
+    ELSE 0 END
+  + 
+  CASE -- date of birth
+    WHEN target.dob = matches.dob THEN 1 
+    -- Single digit typo!
+    WHEN levenshtein(target.dob::text, matches.dob::text) = 1 THEN 0.3
+    ELSE 0 END
+  + 
+  CASE -- zip code
+    WHEN target.zip = matches.zip then 1 
+    ELSE 0 END
+
+  AS match_score,
+  matches.*
+  FROM pmc.all_patient_records target
+   LEFT JOIN pmc.all_patient_records matches
+   ON 1 = 1
+   -- AND matches.enterpriseid <> target.enterpriseid
+   -- Use this to just work with a limited set of possible matches
+   -- This will speed up your queries a bit when working
+   AND matches.first = 'ROBERT' and matches.last = 'SMITH'
+  WHERE 
+    -- Our target here is a child named "ROBERT SMITH" in New York with a birth date of 1998-12-22
+    target.enterpriseid = 15876386
+)
+SELECT CAST(match_score / 14 * 100 AS INT) match_score_normalized, * 
+FROM possible_matches
+WHERE match_score > 3
+ORDER BY match_score DESC
+```
+```{r}
+library(glue)
+
+eids <- 
+  dbGetQuery(con, "SELECT enterpriseID from pmc.all_patient_records WHERE first = 'JAMES' and last = 'SMITH' LIMIT 100")
+
+sql <- "WITH possible_matches AS (
+  SELECT 
+  CASE -- SSN
+    WHEN target.ssn = matches.ssn THEN 5
+    -- Single digit typo!
+    WHEN levenshtein(target.ssn::text, matches.ssn::text) = 1 THEN 0.5
+    ELSE 0 END
+  +
+  CASE -- MRN
+    WHEN target.mrn = matches.mrn THEN 3
+    ELSE 0 END
+  +
+  CASE -- first name
+    WHEN target.first = matches.first THEN 1
+    WHEN SOUNDEX(target.first)  = SOUNDEX(matches.first) THEN 0.5
+    ELSE 0 END
+  + 
+  CASE -- last name 
+    WHEN target.last = matches.last THEN 2 
+    WHEN SOUNDEX(target.last)  = SOUNDEX(target.last) THEN 0.5
+    ELSE 0 END
+  +
+  CASE -- middle name 
+    WHEN target.middle = matches.middle THEN 1 
+    WHEN target.middle IS NULL or matches.middle IS NULL THEN 0.5
+    ELSE 0 END
+  + 
+  CASE -- date of birth
+    WHEN target.dob = matches.dob THEN 1 
+    -- Single digit typo!
+    WHEN levenshtein(target.dob::text, matches.dob::text) = 1 THEN 0.3
+    ELSE 0 END
+  + 
+  CASE -- zip code
+    WHEN target.zip = matches.zip then 1 
+    ELSE 0 END
+
+  AS  match_score, target.enterpriseid,
+  matches.*
+  FROM pmc.all_patient_records target
+   LEFT JOIN pmc.all_patient_records matches
+   ON 1 = 1
+   AND matches.enterpriseid <> target.enterpriseid
+  WHERE 
+    target.enterpriseid = {eid}
+)
+SELECT CAST(match_score / 14 * 100 AS INT) match_score_normalized, * 
+FROM possible_matches
+WHERE match_score > 10
+ORDER BY match_score DESC"
+
+result_set <- tibble()
+for (eid in eids$enterpriseid) {
+    this <- dbGetQuery(con, glue_sql(sql))
+    result_set <- bind_rows(result_set, this)
+}
+
+result_set
+```
+

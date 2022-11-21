@@ -25,39 +25,33 @@ con <- connection_open(RPostgres::Postgres(),
 knitr::opts_chunk$set(connection = "con")
 ```
 
-# SyntheticMGUH As Big Data
+# SyntheticMGUH Registry
 
-For this homework you should act as if the report will be distributed, thus cannot return any PHI. **Do not include identifiers such as names or medical record numbers at the individual level in your results** Avoid returning individual rows unless you want to indicate the structure of a result set for some reason - you should be returning summary data at this point.
+A clinician has collected a series of patients that they will to work with other researchers on. This collection was derived from an EMR and is present in the SyntheticMGUH database as a table called `inpatientregistry` (technically a view). 
 
+* [NIH PHI Review](https://privacyruleandresearch.nih.gov/pr_08.asp#8a) - Includes the 18 elements
 
+They have placed their registry in your regulard database in a table called `inpatientregistry`. Note that it contains columns that are identifiers, and columns that are not. *Your homework report should not contain any identifiers. You will be docked points if it does.*
 
-# Metadata
+```{sql connection=con}
+-- Note that you should delete this section, its just an example
+SELECT * FROM inpatientregistry LIMIT 5
+```
 
-The Synthea data set holds a `imaging` table with meta data. The meta data describes the modality and type of imaging study. 
+# Fully De-identified Table
 
- * Present a summary table of the `imaging` to provide an overview of the most common types of imaging studies performed. (Do not return individual rows, summarize and present the data.)
+Create and return a data set that is fully de-identified.
 
+ * Include all dates 'date shifted'
+ * Include the age at the time of admission and age at the date of death (from the original dates)
+ * Include as much of the data as possible, without violating HIPAA!
 
-# Full Text
+Build a patient lookup table. Note that we should probably randomize the order of the MRNs to make sure that our new ones and the old ones aren't in synch. This happens naturally here, but normally it would be best practice.
 
-## Asthma
+# Limited Data Set Table
 
- * Using free text search, locate all of the patients whose notes indicated they may have asthma. *Do not return the patients, but return a summary of the cohort*
- * How many of the patients you identified have a condition listed as 'asthma' in the `conditions` table?
+Create and return a data set that is de-identified to HIPAA standards. Technically you can return a date of birth, but generally there is no good reason to do so (unless its a pediatric patient).
 
+# Demonstrate Equivilence
 
-## Allergies
-
-Some CT scans are done with "contrast", an intravenous form of dye to make the scan results clearer. People with shellfish allergies may have a similar reaction to contrast dye.
-
- * Allergies are available in Synthea in the allergy table, but in the real world this is not always so clear. Using only the `notes` table, find all the patients that have an shellfish allergy, and then using the `imaging` table determine home many of those patients have had a CT scan.
-
-# Patient Matching
-
- * How many patients in the Synthea database have the same first and last name? How many have the same first, last, gender and live in the same zip code?
-
-Hint: You can do this with a `JOIN` approach or a `GROUP BY` approach. If you use the latter you may want to look at the `HAVING` command as a filter.
-
-# Bonus
-
-* How many patients might have duplicate accounts based on middle name or first name errors? (You may not find any ... but show me how you would approach this.)
+Show that the 3 tables are equivilent, that we have not lost or corrupted any data in the process. At the minumum, show that you have the same number of unique identifiers (in other words, your deidentified results have the exact same number of patients as the original table.)
