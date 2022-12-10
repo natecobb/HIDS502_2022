@@ -1,0 +1,152 @@
+---
+title: "Lecture 10 Homework Key"
+format: 
+  html:
+    self-contained: true
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticMGUH2022",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          # Tell the driver to return very large integers as floating point (vs truncating them)
+          bigint = "numeric")
+
+knitr::opts_chunk$set(connection = "con")
+```
+
+# Big Data
+
+```{sql connection=con}
+WITH observations_per_encounter AS (
+    SELECT encounter, count(*) as heart_rate_observations
+    from observations
+    where code = '8867-4'
+    group by encounter)
+SELECT avg(heart_rate_observations)
+FROM observations_per_encounter;
+```
+
+```{sql connection=con}
+select * from notes limit 10
+
+```
+# String Matching
+
+```{sql connection=con}
+SELECT count(*)
+FROM notes 
+WHERE LOWER(note_text) LIKE '%hea_ache%' OR LOWER(note_text) LIKE '%migraine%'
+```
+
+```{sql connection=con}
+SELECT count(*)
+FROM notes
+WHERE note_text ~* 'headache|migraine'
+```
+
+```{sql connection=con}
+SELECT 
+  'Cobb' as name,
+  soundex('Cobb') as soundex_name,
+  metaphone('Cobb', 10) as metaphone_name
+```
+
+```{sql connection=con}
+SELECT 
+  levenshtein('Cobb', 'Kobb') Cobb_Kobb,
+  levenshtein('Cobb', 'Kob') Cobb_Kob,
+  levenshtein('Cobb', 'Frank') Cobb_Frank
+```
+
+# Patient Matching Challenge
+
+Ok, lets try and actually find some duplicate patients!
+
+First lets find some of the most common potential matches based just on first and last:
+
+```{sql connection=con}
+select apr1.first, apr1.last, count(DISTINCT apr2.enterpriseid)
+FROM pmc.all_patient_records AS apr1
+-- This is a self-join, we are going to join the same table to
+-- itself; to do so we need to give each copy a unique name
+LEFT JOIN pmc.all_patient_records AS apr2
+ ON apr1.last = apr2.last and apr1.first = apr2.first
+  -- Lets only take records on the right hand side where they aren't
+  -- the record on the left!
+  -- AND apr1.enterpriseid <> apr2.enterpriseid
+-- Here we limit to just records (on the left) that have both
+-- a first and last name
+WHERE apr1.last IS NOT NULL and apr1.first IS NOT NULL
+-- Now group by enterpriseid; the names are redundant to helpful to us
+GROUP BY apr1.first, apr1.last
+-- But only records where there are more than 1 copy
+HAVING count(DISTINCT apr1.enterpriseid) > 1
+ORDER BY count(DISTINCT apr1.enterpriseid) desc
+LIMIT 5;
+```
+
+
+Lets try a really simple match check for this person
+
+```{sql connection=con}
+select * 
+from pmc.all_patient_records 
+where first = 'ROBERT' and last = 'SMITH' AND middle like 'D%' and zip = '11210'
+```
+
+Lets think of this a different way, lets start with a single person as a target, using their Enterprise ID, and then start to think about potential matches:
+
+```{sql connection=con}
+SELECT * FROM pmc.all_patient_records target
+WHERE 
+  -- Our target here is a child named "ROBERT SMITH" in New York with a birth date of 1998-12-22
+  target.enterpriseid = 15876386
+```
+
+Below is a very basic query to score all possible matches and return just the top 100 for a single patient - use it as a template.
+
+Think about:
+
+ * Not all match criteria are equally valuable, how do you assign a score to each possibility?
+ * You may want to test for matches on a given field in different ways, how would you do this? For example, how do I catch all the middle name matches of  
+   * Cobb = Cobb
+   * Cobb ~= Kobb
+   * Cobb ~= C
+ * Some fields you will need to deal with potentially missing data, again for a middle name how do you want to score missing vs non-missing as opposed to a mismatch? (In other words, Cobb != NULL is very different from Cobb != Smith)
+ * If you are going to test for distance you will need to think about inverting the scores returned
+ * How would your return just the patients with a possible match based on a fixed score threshold
+ * How would you normalize your score so that it was always between 0 and 1 (or 0 and 100)?
+
+```{sql connection=con}
+SELECT 
+CASE WHEN target.first = matches.first THEN 1 ELSE 0 END
++ 
+CASE WHEN target.last = matches.last THEN 1 ELSE 0 END
++ 
+CASE WHEN target.dob = matches.dob THEN 1 ELSE 0 END
+AS match_score,
+matches.*
+FROM pmc.all_patient_records target
+ LEFT JOIN pmc.all_patient_records matches
+ ON matches.enterpriseid <> target.enterpriseid
+ -- Use this to just work with a limited set of possible matches
+ -- This will speed up your queries a bit when working
+ AND matches.first = 'ROBERT' and matches.last = 'SMITH'
+WHERE 
+  -- Our target here is a child named "ROBERT SMITH" in New York with a birth date of 1998-12-22
+  target.enterpriseid = 15876386
+ORDER BY match_score DESC
+LIMIT 100
+
+```
